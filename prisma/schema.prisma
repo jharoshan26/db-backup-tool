@@ -1,0 +1,322 @@
+// Metadata DB schema for the DB Backup/Restore/Import/Export platform.
+// Engine: PostgreSQL. All tenant-scoped rows carry tenantId for multi-tenant isolation.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum TenantStatus {
+  active
+  suspended
+}
+
+enum UserStatus {
+  active
+  invited
+  disabled
+}
+
+enum DbEngine {
+  mysql
+  mariadb
+  postgres
+}
+
+enum SslMode {
+  disable
+  require
+  verify_full
+}
+
+enum JobType {
+  backup
+  restore
+  export
+  import
+  clone
+}
+
+enum JobStatus {
+  queued
+  running
+  done
+  failed
+  cancelled
+}
+
+enum BackupFormat {
+  sql
+  csv
+  xlsx
+}
+
+enum BackupStatus {
+  pending
+  available
+  failed
+  deleted
+}
+
+enum ScheduleType {
+  backup
+}
+
+enum NotificationChannel {
+  email
+  webhook
+  inapp
+}
+
+enum NotificationStatus {
+  pending
+  sent
+  failed
+}
+
+model Tenant {
+  id        String       @id @default(uuid())
+  name      String
+  slug      String       @unique
+  status    TenantStatus @default(active)
+  settings  Json         @default("{}")
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+
+  users     User[]
+  roles     Role[]
+  servers   DbServer[]
+  jobs      Job[]
+  backups   Backup[]
+  schedules Schedule[]
+  auditLogs AuditLog[]
+  apiKeys   ApiKey[]
+}
+
+model User {
+  id           String     @id @default(uuid())
+  tenantId     String
+  email        String
+  name         String?
+  passwordHash String
+  status       UserStatus @default(active)
+  mfaEnabled   Boolean    @default(false)
+  lastLoginAt  DateTime?
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  tenant        Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  roles         RoleAssignment[]
+  notifications Notification[]
+
+  @@unique([tenantId, email])
+  @@index([tenantId])
+}
+
+model Role {
+  id        String   @id @default(uuid())
+  tenantId  String
+  name      String
+  isSystem  Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  tenant      Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  permissions RolePermission[]
+  assignments RoleAssignment[]
+
+  @@unique([tenantId, name])
+  @@index([tenantId])
+}
+
+model Permission {
+  key         String           @id
+  description String
+  roles       RolePermission[]
+}
+
+model RolePermission {
+  roleId        String
+  permissionKey String
+
+  role       Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionKey], references: [key], onDelete: Cascade)
+
+  @@id([roleId, permissionKey])
+}
+
+model RoleAssignment {
+  userId String
+  roleId String
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role Role @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@id([userId, roleId])
+}
+
+model DbServer {
+  id        String   @id @default(uuid())
+  tenantId  String
+  name      String
+  engine    DbEngine
+  host      String
+  port      Int
+  sslMode   SslMode  @default(disable)
+  metadata  Json     @default("{}")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant     Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  credential Credential?
+  backups    Backup[]
+  schedules  Schedule[]
+
+  @@index([tenantId])
+}
+
+// Envelope-encrypted credentials. Plaintext password is NEVER stored.
+model Credential {
+  id         String   @id @default(uuid())
+  serverId   String   @unique
+  username   String
+  ciphertext String // base64 AES-256-GCM ciphertext of the password
+  authTag    String // base64 GCM auth tag
+  iv         String // base64 IV
+  dekWrapped String // base64 DEK wrapped by KEK
+  keyVersion String   @default("v1")
+  database   String? // optional default database
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  server DbServer @relation(fields: [serverId], references: [id], onDelete: Cascade)
+}
+
+model Job {
+  id        String    @id @default(uuid())
+  tenantId  String
+  type      JobType
+  status    JobStatus @default(queued)
+  progress  Int       @default(0)
+  params    Json      @default("{}")
+  result    Json?
+  error     String?
+  actorId   String?
+  scheduleId String?
+  startedAt DateTime?
+  finishedAt DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  tenant  Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  events  JobEvent[]
+  backup  Backup?
+
+  @@index([tenantId, status])
+  @@index([tenantId, createdAt])
+}
+
+model JobEvent {
+  id        String   @id @default(uuid())
+  jobId     String
+  level     String   @default("info")
+  message   String
+  progress  Int?
+  createdAt DateTime @default(now())
+
+  job Job @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@index([jobId])
+}
+
+model Backup {
+  id         String       @id @default(uuid())
+  tenantId   String
+  serverId   String
+  jobId      String?      @unique
+  database   String
+  format     BackupFormat @default(sql)
+  status     BackupStatus @default(pending)
+  size       BigInt       @default(0)
+  storageUri String?
+  checksum   String?
+  expiresAt  DateTime?
+  createdAt  DateTime     @default(now())
+
+  tenant   Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  server   DbServer @relation(fields: [serverId], references: [id], onDelete: Cascade)
+  job      Job?     @relation(fields: [jobId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId, createdAt])
+  @@index([serverId])
+}
+
+model Schedule {
+  id        String       @id @default(uuid())
+  tenantId  String
+  serverId  String
+  database  String
+  type      ScheduleType @default(backup)
+  cron      String
+  enabled   Boolean      @default(true)
+  retention Int          @default(7) // keep N most recent backups
+  lastRunAt DateTime?
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+
+  tenant Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  server DbServer @relation(fields: [serverId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+}
+
+// Append-only, tamper-evident hash-chained audit log.
+model AuditLog {
+  id        String   @id @default(uuid())
+  tenantId  String
+  actorId   String?
+  actorEmail String?
+  action    String
+  target    String?
+  meta      Json     @default("{}")
+  ip        String?
+  prevHash  String?
+  hash      String
+  createdAt DateTime @default(now())
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, createdAt])
+}
+
+model Notification {
+  id        String              @id @default(uuid())
+  userId    String
+  channel   NotificationChannel @default(inapp)
+  subject   String
+  body      String
+  status    NotificationStatus  @default(pending)
+  readAt    DateTime?
+  createdAt DateTime            @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+}
+
+model ApiKey {
+  id         String    @id @default(uuid())
+  tenantId   String
+  name       String
+  hashedKey  String    @unique
+  lastUsedAt DateTime?
+  revokedAt  DateTime?
+  createdAt  DateTime  @default(now())
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+}

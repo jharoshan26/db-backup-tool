@@ -1,0 +1,113 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: dbtool
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    ports:
+      - '5432:5432'
+
+  redis:
+    image: redis:7-alpine
+    command: ['redis-server', '--appendonly', 'yes']
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    ports:
+      - '6379:6379'
+
+  minio:
+    image: minio/minio:latest
+    command: ['server', '/data', '--console-address', ':9001']
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - miniodata:/data
+    ports:
+      - '9000:9000'
+      - '9001:9001'
+
+  # One-shot: run migrations + create the S3 bucket, then exit.
+  migrate:
+    build: .
+    command: ['sh', '-c', 'npx prisma migrate deploy']
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/dbtool?schema=public
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: 'no'
+
+  api:
+    build: .
+    command: ['node', 'dist/server.js']
+    env_file: .env
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/dbtool?schema=public
+      REDIS_URL: redis://redis:6379
+      STORAGE_DRIVER: s3
+      S3_ENDPOINT: http://minio:9000
+      CORS_ORIGINS: http://localhost:8080
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    ports:
+      - '4000:4000'
+
+  worker:
+    build: .
+    command: ['node', 'dist/worker.js']
+    env_file: .env
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/dbtool?schema=public
+      REDIS_URL: redis://redis:6379
+      STORAGE_DRIVER: s3
+      S3_ENDPOINT: http://minio:9000
+    depends_on:
+      api:
+        condition: service_started
+    deploy:
+      replicas: 2
+
+  scheduler:
+    build: .
+    command: ['node', 'dist/scheduler.js']
+    env_file: .env
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/dbtool?schema=public
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      api:
+        condition: service_started
+
+  frontend:
+    build: ./frontend
+    ports:
+      - '8080:80'
+    depends_on:
+      - api
+
+volumes:
+  pgdata:
+  redisdata:
+  miniodata:

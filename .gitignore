@@ -1,0 +1,35 @@
+# Dependencies
+node_modules/
+*/node_modules/
+
+# Build output
+dist/
+build/
+*.tsbuildinfo
+
+# Env / secrets
+.env
+.env.local
+*.pem
+*.key
+
+# Data / runtime
+data/
+storage/
+backups/
+tmp/
+*.log
+logs/
+
+# Prisma
+prisma/*.db
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+coverage/
+
+# Frontend
+frontend/dist/
+frontend/.vite/
